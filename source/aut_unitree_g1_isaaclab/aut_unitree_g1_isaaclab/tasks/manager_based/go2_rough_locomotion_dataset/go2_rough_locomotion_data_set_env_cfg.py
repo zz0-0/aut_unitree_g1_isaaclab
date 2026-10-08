@@ -104,6 +104,7 @@ class Go2RoughEnvCfg(LocomotionVelocityRoughEnvCfg):
             },
         }
         self.events.base_com = None
+        self.rewards.undesired_contacts.params["sensor_cfg"].body_names = [".*_thigh"]
 
         # Commands - disallow negative forward velocity (no backwards commands) for control consistency
         self.commands.base_velocity.ranges.lin_vel_x = (0.0, 1.0)

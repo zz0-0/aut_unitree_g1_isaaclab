@@ -151,6 +151,13 @@ class G1RoughEnvCfg(LocomotionVelocityRoughEnvCfg):
         )
         
         self.events.add_base_mass = None
+        # G1 root body is torso_link, not "base"
+        self.events.base_com.params["asset_cfg"].body_names = "torso_link"
+        self.events.base_external_force_torque.params["asset_cfg"].body_names = [
+            "torso_link"
+        ]
+        self.terminations.base_contact.params["sensor_cfg"].body_names = "torso_link"
+        self.rewards.feet_air_time.params["sensor_cfg"].body_names = ".*ankle_roll.*"
         # disallow negative forward velocity commands (no backwards commands)
         self.commands.base_velocity.ranges.lin_vel_x = (0.0, 1.0)
 

@@ -25,7 +25,7 @@ from numpy.lib.format import open_memmap
 
 # Add paths
 sys.path.append("/home/ryz5920/Project/IsaacLab/source")
-sys.path.append("/home/ryz5920/Project/aut_unitree_g1_isaaclab/source")
+sys.path.append(str(Path(__file__).resolve().parents[3] / "source"))
 
 from isaaclab.app import AppLauncher
 
@@ -64,6 +64,12 @@ parser.add_argument(
     help="Directory to save the memmap dataset folder.",
 )
 parser.add_argument(
+    "--output_name",
+    type=str,
+    default=None,
+    help="Optional fixed dataset folder name instead of a timestamped one.",
+)
+parser.add_argument(
     "--seed", type=int, default=42, help="Random seed for reproducibility."
 )
 parser.add_argument(
@@ -73,15 +79,48 @@ parser.add_argument(
     help="Path to policy checkpoint for data collection.",
 )
 parser.add_argument(
+    "--external_policy_onnx",
+    type=str,
+    default=None,
+    help="Path to a unitree_rl_lab exported ONNX velocity policy (unseen controller).",
+)
+parser.add_argument(
+    "--external_action_scale",
+    type=float,
+    default=0.25,
+    help="Action scale the external policy was trained with.",
+)
+parser.add_argument(
     "--use_random_policy",
     action="store_true",
     help="Use random policy instead of trained policy.",
+)
+parser.add_argument(
+    "--joint_friction_mu_range",
+    nargs=2,
+    type=float,
+    default=[0.0, 0.0],
+    metavar=("MIN", "MAX"),
+    help="Per-environment Coulomb friction torque range (N*m). Enables joint friction logging.",
+)
+parser.add_argument(
+    "--joint_friction_viscous_range",
+    nargs=2,
+    type=float,
+    default=[0.0, 0.0],
+    metavar=("MIN", "MAX"),
+    help="Per-environment viscous friction coefficient range (N*m*s/rad).",
 )
 parser.add_argument(
     "--max_terrain_level",
     type=int,
     default=None,
     help="Maximum terrain difficulty level (0-5). If None, uses default curriculum.",
+)
+parser.add_argument(
+    "--flat_terrain",
+    action="store_true",
+    help="Use a flat plane instead of the rough terrain generator.",
 )
 parser.add_argument(
     "--agent",
@@ -107,12 +146,18 @@ simulation_app = app_launcher.app
 """Rest everything follows."""
 
 import gymnasium as gym
-from rsl_rl.runners import OnPolicyRunner
+from torch import nn
 
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.utils.assets import retrieve_file_path
+from isaaclab.utils.math import quat_apply_inverse
 
 import aut_unitree_g1_isaaclab  # noqa: F401
+from aut_unitree_g1_isaaclab.policies import (
+    ActorMLPPolicy,
+    LocalPPOPolicy,
+    UnitreeRLLabOnnxPolicy,
+)
 
 importlib.import_module(
     "aut_unitree_g1_isaaclab.tasks.manager_based.g1_rough_locomotion_dataset"
@@ -156,6 +201,7 @@ class MemmapDatasetCollector:
         hand_body_names: list[str],
         field_metadata: dict[str, dict[str, str]],
         global_metadata: dict[str, str | int | float],
+        dataset_name: str | None = None,
     ):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -174,9 +220,8 @@ class MemmapDatasetCollector:
         self.hand_body_names = list(hand_body_names)
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.dataset_dir = (
-            self.output_dir / f"{self.robot_type}_locomotion_memmap_{timestamp}"
-        )
+        folder_name = dataset_name or f"{self.robot_type}_locomotion_memmap_{timestamp}"
+        self.dataset_dir = self.output_dir / folder_name
         self.dataset_dir.mkdir(parents=True, exist_ok=True)
 
         self.data_memmaps: dict[str, np.memmap] = {}
@@ -324,6 +369,16 @@ class MemmapDatasetCollector:
         }
 
 
+def collect_joint_friction(robot) -> np.ndarray:
+    """Assemble injected friction torques into robot joint order."""
+    joint_friction = torch.zeros_like(robot.data.joint_pos)
+    for actuator in robot.actuators.values():
+        friction_torque = getattr(actuator, "friction_torque", None)
+        if friction_torque is not None and getattr(actuator, "friction_enabled", False):
+            joint_friction[:, actuator.joint_indices] = friction_torque
+    return joint_friction.cpu().numpy()
+
+
 def collect_step_data(env, actions, foot_indices: list[int], hand_indices: list[int]):
     """Collect batched step data for all environments."""
     scene = env.unwrapped.scene
@@ -339,31 +394,74 @@ def collect_step_data(env, actions, foot_indices: list[int], hand_indices: list[
     else:
         contact_states = force_contact
 
+    net_forces_w = contact_forces.data.net_forces_w[:, foot_indices, :]
+    joint_friction_enabled = any(
+        getattr(actuator, "friction_enabled", False)
+        for actuator in robot.actuators.values()
+    )
+
+    root_quat_w = robot.data.root_quat_w
+    root_link_pos_w = robot.data.root_link_pos_w
+    root_com_lin_vel_w = robot.data.root_com_lin_vel_w
+
+    foot_pos_w = robot.data.body_link_pos_w[:, foot_indices, :]
+    foot_lin_vel_w = robot.data.body_link_lin_vel_w[:, foot_indices, :]
+    foot_quat_w = root_quat_w.unsqueeze(1).repeat(1, len(foot_indices), 1)
+    foot_pos_b = quat_apply_inverse(
+        foot_quat_w, foot_pos_w - root_link_pos_w.unsqueeze(1)
+    )
+    foot_lin_vel_b = quat_apply_inverse(
+        foot_quat_w, foot_lin_vel_w - root_com_lin_vel_w.unsqueeze(1)
+    )
+    net_forces_b = quat_apply_inverse(foot_quat_w, net_forces_w)
+
+    if len(hand_indices) > 0:
+        hand_pos_w = robot.data.body_link_pos_w[:, hand_indices, :]
+        hand_lin_vel_w = robot.data.body_link_lin_vel_w[:, hand_indices, :]
+        hand_quat_w = root_quat_w.unsqueeze(1).repeat(1, len(hand_indices), 1)
+        hand_pos_b = quat_apply_inverse(
+            hand_quat_w, hand_pos_w - root_link_pos_w.unsqueeze(1)
+        )
+        hand_lin_vel_b = quat_apply_inverse(
+            hand_quat_w, hand_lin_vel_w - root_com_lin_vel_w.unsqueeze(1)
+        )
+    else:
+        hand_pos_w = None
+        hand_lin_vel_w = None
+        hand_pos_b = None
+        hand_lin_vel_b = None
+
     return {
-        "root_com_lin_vel_w": robot.data.root_com_lin_vel_w.cpu().numpy(),
+        "root_com_lin_vel_w": root_com_lin_vel_w.cpu().numpy(),
         "root_com_ang_vel_w": robot.data.root_com_ang_vel_w.cpu().numpy(),
+        "root_com_lin_vel_b": robot.data.root_com_lin_vel_b.cpu().numpy(),
+        "root_com_ang_vel_b": robot.data.root_com_ang_vel_b.cpu().numpy(),
         "imu_lin_acc": scene["imu"].data.lin_acc_b.cpu().numpy(),
         "imu_ang_vel": scene["imu"].data.ang_vel_b.cpu().numpy(),
         "joint_pos": robot.data.joint_pos.cpu().numpy(),
         "joint_vel": robot.data.joint_vel.cpu().numpy(),
         "joint_torque": robot.data.applied_torque.cpu().numpy(),
-        "contact_forces": contact_forces.data.net_forces_w[:, foot_indices, :]
-        .cpu()
-        .numpy(),
-        "contact_states": contact_states.cpu().numpy(),
-        "foot_pos_w": robot.data.body_link_pos_w[:, foot_indices, :].cpu().numpy(),
-        "foot_lin_vel_w": robot.data.body_link_lin_vel_w[:, foot_indices, :]
-        .cpu()
-        .numpy(),
-        "hand_pos_w": (
-            robot.data.body_link_pos_w[:, hand_indices, :].cpu().numpy()
-            if len(hand_indices) > 0
-            else None
+        "joint_acc": robot.data.joint_acc.cpu().numpy(),
+        "base_ang_acc": scene["imu"].data.ang_acc_b.cpu().numpy(),
+        "total_grf": net_forces_w.sum(dim=1).cpu().numpy(),
+        "total_grf_b": net_forces_b.sum(dim=1).cpu().numpy(),
+        "joint_friction": (
+            collect_joint_friction(robot) if joint_friction_enabled else None
         ),
+        "contact_forces": net_forces_w.cpu().numpy(),
+        "contact_forces_b": net_forces_b.cpu().numpy(),
+        "contact_states": contact_states.cpu().numpy(),
+        "foot_pos_w": foot_pos_w.cpu().numpy(),
+        "foot_lin_vel_w": foot_lin_vel_w.cpu().numpy(),
+        "foot_pos_b": foot_pos_b.cpu().numpy(),
+        "foot_lin_vel_b": foot_lin_vel_b.cpu().numpy(),
+        "hand_pos_w": None if hand_pos_w is None else hand_pos_w.cpu().numpy(),
         "hand_lin_vel_w": (
-            robot.data.body_link_lin_vel_w[:, hand_indices, :].cpu().numpy()
-            if len(hand_indices) > 0
-            else None
+            None if hand_lin_vel_w is None else hand_lin_vel_w.cpu().numpy()
+        ),
+        "hand_pos_b": None if hand_pos_b is None else hand_pos_b.cpu().numpy(),
+        "hand_lin_vel_b": (
+            None if hand_lin_vel_b is None else hand_lin_vel_b.cpu().numpy()
         ),
     }
 
@@ -377,8 +475,35 @@ def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
         args_cli.device if args_cli.device is not None else env_cfg.sim.device
     )
 
+    friction_requested = any(
+        value > 0.0
+        for value in (
+            *args_cli.joint_friction_mu_range,
+            *args_cli.joint_friction_viscous_range,
+        )
+    )
+    if friction_requested:
+        for actuator_cfg in env_cfg.scene.robot.actuators.values():
+            if hasattr(actuator_cfg, "friction_mu_range"):
+                actuator_cfg.friction_mu_range = tuple(args_cli.joint_friction_mu_range)
+                actuator_cfg.friction_viscous_range = tuple(
+                    args_cli.joint_friction_viscous_range
+                )
+        print(
+            "[INFO] Joint friction injection enabled: "
+            f"mu={tuple(args_cli.joint_friction_mu_range)} N*m, "
+            f"viscous={tuple(args_cli.joint_friction_viscous_range)} N*m*s/rad"
+        )
+
     if args_cli.max_terrain_level is not None:
         env_cfg.scene.terrain.max_init_terrain_level = args_cli.max_terrain_level
+    if args_cli.flat_terrain:
+        env_cfg.scene.terrain.terrain_type = "plane"
+        env_cfg.scene.terrain.terrain_generator = None
+        if hasattr(env_cfg, "curriculum") and hasattr(
+            env_cfg.curriculum, "terrain_levels"
+        ):
+            env_cfg.curriculum.terrain_levels = None
 
     robot_type = infer_robot_type(args_cli.task)
 
@@ -398,14 +523,50 @@ def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
 
     policy = None
-    if not args_cli.use_random_policy and args_cli.policy_checkpoint:
+    if args_cli.external_policy_onnx:
+        print(
+            f"[INFO] Loading external ONNX policy from: {args_cli.external_policy_onnx}"
+        )
+        policy = UnitreeRLLabOnnxPolicy(
+            args_cli.external_policy_onnx,
+            env.unwrapped,
+            action_scale=args_cli.external_action_scale,
+        )
+        print("[INFO] External policy ready")
+    elif not args_cli.use_random_policy and args_cli.policy_checkpoint:
         print(f"[INFO] Loading policy from: {args_cli.policy_checkpoint}")
         resume_path = retrieve_file_path(args_cli.policy_checkpoint)
-        runner = OnPolicyRunner(
-            env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device
+        checkpoint = torch.load(resume_path, map_location="cpu", weights_only=False)
+        state_dict = (
+            checkpoint.get("model_state_dict")
+            or checkpoint.get("state_dict")
+            or checkpoint
         )
-        runner.load(resume_path)
-        policy = runner.get_inference_policy(device=env.unwrapped.device)
+        has_classic_actor = any(
+            str(key).startswith("actor.0.weight") for key in state_dict
+        )
+        if has_classic_actor:
+            policy = ActorMLPPolicy(state_dict, device=str(env.unwrapped.device))
+            print("[INFO] Actor loaded (classic rsl-rl checkpoint)")
+        else:
+            agent_dict = agent_cfg.to_dict()
+            for model_group in ("actor", "critic"):
+                model_cfg = agent_dict.get(model_group)
+                if isinstance(model_cfg, dict):
+                    for deprecated_key in (
+                        "stochastic",
+                        "init_noise_std",
+                        "noise_std_type",
+                        "state_dependent_std",
+                    ):
+                        model_cfg.pop(deprecated_key, None)
+            policy = LocalPPOPolicy(
+                resume_path,
+                env,
+                agent_dict,
+                device=str(agent_cfg.device),
+            )
+            print("[INFO] Actor loaded (rsl-rl >= 5 runner checkpoint)")
     else:
         print("[INFO] Using random policy for data collection")
 
@@ -435,12 +596,22 @@ def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     field_specs = {
         "root_com_lin_vel_w": {"dtype": np.float32, "shape_per_step": (3,)},
         "root_com_ang_vel_w": {"dtype": np.float32, "shape_per_step": (3,)},
+        "root_com_lin_vel_b": {"dtype": np.float32, "shape_per_step": (3,)},
+        "root_com_ang_vel_b": {"dtype": np.float32, "shape_per_step": (3,)},
         "imu_lin_acc": {"dtype": np.float32, "shape_per_step": (3,)},
         "imu_ang_vel": {"dtype": np.float32, "shape_per_step": (3,)},
         "joint_pos": {"dtype": np.float32, "shape_per_step": (len(joint_names),)},
         "joint_vel": {"dtype": np.float32, "shape_per_step": (len(joint_names),)},
         "joint_torque": {"dtype": np.float32, "shape_per_step": (len(joint_names),)},
+        "joint_acc": {"dtype": np.float32, "shape_per_step": (len(joint_names),)},
+        "base_ang_acc": {"dtype": np.float32, "shape_per_step": (3,)},
+        "total_grf": {"dtype": np.float32, "shape_per_step": (3,)},
+        "total_grf_b": {"dtype": np.float32, "shape_per_step": (3,)},
         "contact_forces": {
+            "dtype": np.float32,
+            "shape_per_step": (len(foot_body_names), 3),
+        },
+        "contact_forces_b": {
             "dtype": np.float32,
             "shape_per_step": (len(foot_body_names), 3),
         },
@@ -456,13 +627,34 @@ def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
             "dtype": np.float32,
             "shape_per_step": (len(foot_body_names), 3),
         },
+        "foot_pos_b": {
+            "dtype": np.float32,
+            "shape_per_step": (len(foot_body_names), 3),
+        },
+        "foot_lin_vel_b": {
+            "dtype": np.float32,
+            "shape_per_step": (len(foot_body_names), 3),
+        },
     }
+    if friction_requested:
+        field_specs["joint_friction"] = {
+            "dtype": np.float32,
+            "shape_per_step": (len(joint_names),),
+        }
     if len(hand_body_names) > 0:
         field_specs["hand_pos_w"] = {
             "dtype": np.float32,
             "shape_per_step": (len(hand_body_names), 3),
         }
         field_specs["hand_lin_vel_w"] = {
+            "dtype": np.float32,
+            "shape_per_step": (len(hand_body_names), 3),
+        }
+        field_specs["hand_pos_b"] = {
+            "dtype": np.float32,
+            "shape_per_step": (len(hand_body_names), 3),
+        }
+        field_specs["hand_lin_vel_b"] = {
             "dtype": np.float32,
             "shape_per_step": (len(hand_body_names), 3),
         }
@@ -478,6 +670,18 @@ def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
             "description": "Root center-of-mass angular velocity in world frame",
             "units": "rad/s",
             "frame": "world",
+            "shape_per_step": "[3]",
+        },
+        "root_com_lin_vel_b": {
+            "description": "Root center-of-mass linear velocity in base frame",
+            "units": "m/s",
+            "frame": "base",
+            "shape_per_step": "[3]",
+        },
+        "root_com_ang_vel_b": {
+            "description": "Root center-of-mass angular velocity in base frame",
+            "units": "rad/s",
+            "frame": "base",
             "shape_per_step": "[3]",
         },
         "imu_lin_acc": {
@@ -510,10 +714,41 @@ def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
             "index_map": "index_maps/joint_names",
             "shape_per_step": "[num_joints]",
         },
+        "joint_acc": {
+            "description": "Joint accelerations ordered by index_maps/joint_names",
+            "units": "rad/s^2",
+            "index_map": "index_maps/joint_names",
+            "shape_per_step": "[num_joints]",
+        },
+        "base_ang_acc": {
+            "description": "IMU body-frame angular acceleration",
+            "units": "rad/s^2",
+            "frame": "body",
+            "shape_per_step": "[3]",
+        },
+        "total_grf": {
+            "description": "Sum of net ground reaction forces over selected feet",
+            "units": "N",
+            "frame": "world",
+            "shape_per_step": "[3]",
+        },
+        "total_grf_b": {
+            "description": "Sum of net ground reaction forces over selected feet in base frame",
+            "units": "N",
+            "frame": "base",
+            "shape_per_step": "[3]",
+        },
         "contact_forces": {
             "description": "Net contact force vectors for selected feet in world frame",
             "units": "N",
             "frame": "world",
+            "index_map": "index_maps/foot_body_names",
+            "shape_per_step": "[num_feet, 3]",
+        },
+        "contact_forces_b": {
+            "description": "Net contact force vectors for selected feet in base frame",
+            "units": "N",
+            "frame": "base",
             "index_map": "index_maps/foot_body_names",
             "shape_per_step": "[num_feet, 3]",
         },
@@ -538,7 +773,31 @@ def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
             "index_map": "index_maps/foot_body_names",
             "shape_per_step": "[num_feet, 3]",
         },
+        "foot_pos_b": {
+            "description": "Foot link positions relative to the base link in base frame",
+            "units": "meters",
+            "frame": "base",
+            "index_map": "index_maps/foot_body_names",
+            "shape_per_step": "[num_feet, 3]",
+        },
+        "foot_lin_vel_b": {
+            "description": "Foot link linear velocities relative to the root COM in base frame",
+            "units": "m/s",
+            "frame": "base",
+            "index_map": "index_maps/foot_body_names",
+            "shape_per_step": "[num_feet, 3]",
+        },
     }
+    if friction_requested:
+        field_metadata["joint_friction"] = {
+            "description": (
+                "Injected Coulomb + viscous joint friction torque ordered by "
+                "index_maps/joint_names"
+            ),
+            "units": "N*m",
+            "index_map": "index_maps/joint_names",
+            "shape_per_step": "[num_joints]",
+        }
     if len(hand_body_names) > 0:
         field_metadata["hand_pos_w"] = {
             "description": "Hand link positions in world frame",
@@ -554,6 +813,20 @@ def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
             "index_map": "index_maps/hand_body_names",
             "shape_per_step": "[num_hands, 3]",
         }
+        field_metadata["hand_pos_b"] = {
+            "description": "Hand link positions relative to the base link in base frame",
+            "units": "meters",
+            "frame": "base",
+            "index_map": "index_maps/hand_body_names",
+            "shape_per_step": "[num_hands, 3]",
+        }
+        field_metadata["hand_lin_vel_b"] = {
+            "description": "Hand link linear velocities relative to the root COM in base frame",
+            "units": "m/s",
+            "frame": "base",
+            "index_map": "index_maps/hand_body_names",
+            "shape_per_step": "[num_hands, 3]",
+        }
 
     collector = MemmapDatasetCollector(
         output_dir=args_cli.output_dir,
@@ -566,11 +839,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
         foot_body_names=foot_body_names,
         hand_body_names=hand_body_names,
         field_metadata=field_metadata,
+        dataset_name=args_cli.output_name,
         global_metadata={
             "task": args_cli.task,
             "seed": args_cli.seed,
             "contact_force_threshold_N": 1.0,
             "contact_time_threshold_s": 0.0,
+            "control_dt": float(env.unwrapped.step_dt),
         },
     )
 
@@ -592,7 +867,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     while not envs_completed.all():
         with torch.inference_mode():
             if policy is not None:
-                actions = policy(obs)
+                if isinstance(policy, LocalPPOPolicy):
+                    actions = policy(obs)
+                else:
+                    policy_obs = (
+                        obs["policy"]
+                        if hasattr(obs, "keys") and "policy" in obs.keys()
+                        else obs
+                    )
+                    actions = policy(policy_obs)
             else:
                 actions = torch.randn(
                     args_cli.num_envs, num_actions, device=env.unwrapped.device

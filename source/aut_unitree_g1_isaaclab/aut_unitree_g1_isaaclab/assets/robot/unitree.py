@@ -1,10 +1,16 @@
+from pathlib import Path
+
 from isaaclab.actuators.actuator_cfg import ImplicitActuatorCfg, DCMotorCfg
+from aut_unitree_g1_isaaclab.actuators import (
+    FrictionDCMotorCfg,
+    FrictionImplicitActuatorCfg,
+)
 from isaaclab.assets.articulation.articulation_cfg import ArticulationCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAACLAB_NUCLEUS_DIR
 import isaaclab.sim as sim_utils
 
-UNITREE_MODEL_DIR = "/home/ryz5920/Project/aut_unitree_g1_isaaclab/source/aut_unitree_g1_isaaclab/aut_unitree_g1_isaaclab/assets/robot"
+UNITREE_MODEL_DIR = str(Path(__file__).resolve().parent)
 
 # Reuse the validated floating-base USD from unitree_rl_lab for locomotion
 UNITREE_RL_LAB_MODEL_DIR = "/home/ryz5920/Project/unitree_rl_lab/source/unitree_rl_lab/unitree_rl_lab/assets/robots/unitree_model"
@@ -125,7 +131,7 @@ UNITREE_G1_29DOF_CFG_WITH_INSPIRE_HAND = UnitreeArticulationCfg(
     ),
     soft_joint_pos_limit_factor=0.9,
     actuators={
-        "legs": ImplicitActuatorCfg(
+        "legs": FrictionImplicitActuatorCfg(
             joint_names_expr=[
                 ".*_hip_yaw_joint", 
                 ".*_hip_roll_joint",
@@ -138,7 +144,7 @@ UNITREE_G1_29DOF_CFG_WITH_INSPIRE_HAND = UnitreeArticulationCfg(
             damping=2.0,     # PD control damping for leg joints  
             armature=None,
         ),
-        "waist": ImplicitActuatorCfg(
+        "waist": FrictionImplicitActuatorCfg(
             joint_names_expr=[
                 "waist_yaw_joint",
                 "waist_roll_joint",
@@ -158,14 +164,14 @@ UNITREE_G1_29DOF_CFG_WITH_INSPIRE_HAND = UnitreeArticulationCfg(
             },
             armature=None,
         ),
-        "feet": ImplicitActuatorCfg(
+        "feet": FrictionImplicitActuatorCfg(
             effort_limit=None,
             joint_names_expr=[".*_ankle_pitch_joint", ".*_ankle_roll_joint"],
             stiffness=20.0,  # PD control stiffness for ankle joints
             damping=1.0,     # PD control damping for ankle joints
             # armature=0.001,
         ),
-        "arms": ImplicitActuatorCfg(
+        "arms": FrictionImplicitActuatorCfg(
             joint_names_expr=[
                 ".*_shoulder_.*_joint",
                 ".*_elbow_joint",
@@ -185,7 +191,7 @@ UNITREE_G1_29DOF_CFG_WITH_INSPIRE_HAND = UnitreeArticulationCfg(
              },
             armature=None,
         ),
-        "hands": ImplicitActuatorCfg(
+        "hands": FrictionImplicitActuatorCfg(
             joint_names_expr=[
                 ".*_index_proximal_joint",
                 ".*_index_intermediate_joint",
@@ -303,7 +309,7 @@ UNITREE_G1_29DOF_CFG_WITH_INSPIRE_HAND_WHOLEBODY = ArticulationCfg(
     ),
     soft_joint_pos_limit_factor=0.90,
     actuators={
-        "legs": ImplicitActuatorCfg(
+        "legs": FrictionImplicitActuatorCfg(
             joint_names_expr=[
                 ".*_hip_yaw_joint",
                 ".*_hip_roll_joint",
@@ -336,7 +342,7 @@ UNITREE_G1_29DOF_CFG_WITH_INSPIRE_HAND_WHOLEBODY = ArticulationCfg(
             },
             armature=0.01,
         ),
-        "waist": ImplicitActuatorCfg(
+        "waist": FrictionImplicitActuatorCfg(
             joint_names_expr=[
                 "waist_yaw_joint",
                 "waist_roll_joint",
@@ -364,7 +370,7 @@ UNITREE_G1_29DOF_CFG_WITH_INSPIRE_HAND_WHOLEBODY = ArticulationCfg(
             },
             armature=0.01,
         ),
-        "feet": ImplicitActuatorCfg(
+        "feet": FrictionImplicitActuatorCfg(
             joint_names_expr=[".*_ankle_pitch_joint", ".*_ankle_roll_joint"],
             effort_limit_sim=35.0,
             velocity_limit_sim=30.0,
@@ -372,7 +378,7 @@ UNITREE_G1_29DOF_CFG_WITH_INSPIRE_HAND_WHOLEBODY = ArticulationCfg(
             damping=2.0,
             armature=0.01,
         ),
-        "shoulders": ImplicitActuatorCfg(
+        "shoulders": FrictionImplicitActuatorCfg(
             joint_names_expr=[
                 ".*_shoulder_pitch_joint",
                 ".*_shoulder_roll_joint",
@@ -389,7 +395,7 @@ UNITREE_G1_29DOF_CFG_WITH_INSPIRE_HAND_WHOLEBODY = ArticulationCfg(
             damping=2.0,
             armature=0.01,
         ),
-        "arms": ImplicitActuatorCfg(
+        "arms": FrictionImplicitActuatorCfg(
             joint_names_expr=[
                 ".*_shoulder_yaw_joint",
                 ".*_elbow_joint",
@@ -406,7 +412,7 @@ UNITREE_G1_29DOF_CFG_WITH_INSPIRE_HAND_WHOLEBODY = ArticulationCfg(
             damping=2.0,
             armature=0.01,
         ),
-        "wrist": ImplicitActuatorCfg(
+        "wrist": FrictionImplicitActuatorCfg(
             joint_names_expr=[
                 ".*_wrist_.*",
             ],
@@ -424,7 +430,7 @@ UNITREE_G1_29DOF_CFG_WITH_INSPIRE_HAND_WHOLEBODY = ArticulationCfg(
             damping=2.0,
             armature=0.01,
         ),
-        "hands": ImplicitActuatorCfg(
+        "hands": FrictionImplicitActuatorCfg(
             joint_names_expr=[
                 ".*_index_proximal_joint",
                 ".*_index_intermediate_joint",
@@ -498,7 +504,7 @@ UNITREE_G1_29DOF_CFG_RLLAB = UnitreeArticulationCfg(
         joint_vel={".*": 0.0},
     ),
     actuators={
-        "N7520-14.3": ImplicitActuatorCfg(
+        "N7520-14.3": FrictionImplicitActuatorCfg(
             joint_names_expr=[".*_hip_pitch_.*", ".*_hip_yaw_.*", "waist_yaw_joint"],
             effort_limit_sim=88,
             velocity_limit_sim=32.0,
@@ -512,7 +518,7 @@ UNITREE_G1_29DOF_CFG_RLLAB = UnitreeArticulationCfg(
             },
             armature=0.01,
         ),
-        "N7520-22.5": ImplicitActuatorCfg(
+        "N7520-22.5": FrictionImplicitActuatorCfg(
             joint_names_expr=[".*_hip_roll_.*", ".*_knee_.*"],
             effort_limit_sim=139,
             velocity_limit_sim=20.0,
@@ -526,7 +532,7 @@ UNITREE_G1_29DOF_CFG_RLLAB = UnitreeArticulationCfg(
             },
             armature=0.01,
         ),
-        "N5020-16": ImplicitActuatorCfg(
+        "N5020-16": FrictionImplicitActuatorCfg(
             joint_names_expr=[
                 ".*_shoulder_.*",
                 ".*_elbow_.*",
@@ -547,7 +553,7 @@ UNITREE_G1_29DOF_CFG_RLLAB = UnitreeArticulationCfg(
             },
             armature=0.01,
         ),
-        "W4010-25": ImplicitActuatorCfg(
+        "W4010-25": FrictionImplicitActuatorCfg(
             joint_names_expr=[".*_wrist_pitch.*", ".*_wrist_yaw.*"],
             effort_limit_sim=5,
             velocity_limit_sim=22,
@@ -625,7 +631,7 @@ UNITREE_GO2_CFG = ArticulationCfg(
     ),
     soft_joint_pos_limit_factor=0.9,
     actuators={
-        "base_legs": DCMotorCfg(
+        "base_legs": FrictionDCMotorCfg(
             joint_names_expr=[".*_hip_joint", ".*_thigh_joint", ".*_calf_joint"],
             effort_limit=23.5,
             saturation_effort=23.5,

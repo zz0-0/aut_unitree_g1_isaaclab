@@ -190,13 +190,25 @@ def main(
 
     print(f"[INFO]: Loading model checkpoint from: {resume_path}")
     # load previously trained model
+    agent_dict = agent_cfg.to_dict()
+    for model_group in ("actor", "critic"):
+        model_cfg = agent_dict.get(model_group)
+        if isinstance(model_cfg, dict):
+            for deprecated_key in (
+                "stochastic",
+                "init_noise_std",
+                "noise_std_type",
+                "state_dependent_std",
+            ):
+                model_cfg.pop(deprecated_key, None)
+
     if agent_cfg.class_name == "OnPolicyRunner":
         runner = OnPolicyRunner(
-            env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device
+            env, agent_dict, log_dir=None, device=agent_cfg.device
         )
     elif agent_cfg.class_name == "DistillationRunner":
         runner = DistillationRunner(
-            env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device
+            env, agent_dict, log_dir=None, device=agent_cfg.device
         )
     else:
         raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")

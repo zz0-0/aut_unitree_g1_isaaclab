@@ -190,10 +190,33 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
 
     # create runner from rsl-rl
+    def _strip_deprecated_model_kwargs(config_dict: dict) -> dict:
+        for model_group in ("actor", "critic"):
+            model_cfg = config_dict.get(model_group)
+            if isinstance(model_cfg, dict):
+                for deprecated_key in (
+                    "stochastic",
+                    "init_noise_std",
+                    "noise_std_type",
+                    "state_dependent_std",
+                ):
+                    model_cfg.pop(deprecated_key, None)
+        return config_dict
+
     if agent_cfg.class_name == "OnPolicyRunner":
-        runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
+        runner = OnPolicyRunner(
+            env,
+            _strip_deprecated_model_kwargs(agent_cfg.to_dict()),
+            log_dir=log_dir,
+            device=agent_cfg.device,
+        )
     elif agent_cfg.class_name == "DistillationRunner":
-        runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
+        runner = DistillationRunner(
+            env,
+            _strip_deprecated_model_kwargs(agent_cfg.to_dict()),
+            log_dir=log_dir,
+            device=agent_cfg.device,
+        )
     else:
         raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
     # write git state to logs
