@@ -271,6 +271,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     frame_times_ms: list[float] = []
     obs = env.get_observations()
     done = torch.zeros(args_cli.num_envs, dtype=torch.bool, device=unwrapped.device)
+    history_warmup = max(0, int(getattr(estimator, "history_length", 1)) - 1)
+    metrics_start = max(args_cli.latency_warmup, history_warmup)
+    reset_count = 0
 
     with torch.inference_mode():
         for step in range(args_cli.steps):
@@ -292,27 +295,28 @@ def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
                 latencies_ms.append(infer_ms)
                 frame_times_ms.append(frame_time_ms)
 
-            for output_type in output_types:
-                key = output_type.value
-                if key not in predictions:
-                    continue
-                pred = np.asarray(predictions[key], dtype=np.float32).reshape(-1)
-                target = np.asarray(ground_truth[key], dtype=np.float32).reshape(-1)
-                if output_type in (
-                    OutputType.JOINT_ACCELERATION,
-                    OutputType.JOINT_FRICTION,
-                ):
-                    target = reorder_joint_gt(target, estimator)
-                if pred.shape != target.shape:
-                    continue
-                sums_abs[key] += float(np.abs(pred - target).sum())
-                sums_sq[key] += float(((pred - target) ** 2).sum())
-                counts[key] += int(pred.size)
-                if output_type == OutputType.CONTACT:
-                    contact_hits += int(
-                        ((pred > 0.5) == (target > 0.5)).sum()
-                    )
-                    contact_total += int(pred.size)
+            if step >= metrics_start:
+                for output_type in output_types:
+                    key = output_type.value
+                    if key not in predictions:
+                        continue
+                    pred = np.asarray(predictions[key], dtype=np.float32).reshape(-1)
+                    target = np.asarray(ground_truth[key], dtype=np.float32).reshape(-1)
+                    if output_type in (
+                        OutputType.JOINT_ACCELERATION,
+                        OutputType.JOINT_FRICTION,
+                    ):
+                        target = reorder_joint_gt(target, estimator)
+                    if pred.shape != target.shape:
+                        continue
+                    sums_abs[key] += float(np.abs(pred - target).sum())
+                    sums_sq[key] += float(((pred - target) ** 2).sum())
+                    counts[key] += int(pred.size)
+                    if output_type == OutputType.CONTACT:
+                        contact_hits += int(
+                            ((pred > 0.5) == (target > 0.5)).sum()
+                        )
+                        contact_total += int(pred.size)
 
             if policy is not None:
                 policy_obs = (
@@ -332,6 +336,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
             done = dones
             if bool(torch.as_tensor(done).any()):
                 estimator.reset()
+                reset_count += 1
+                metrics_start = max(metrics_start, step + 1 + history_warmup)
 
     metrics: dict[str, dict[str, float]] = {}
     for key, count in counts.items():
@@ -354,6 +360,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
         "steps": args_cli.steps,
         "num_envs": args_cli.num_envs,
         "control_dt_s": float(unwrapped.step_dt),
+        "metrics_warmup_steps": history_warmup,
+        "episode_resets": reset_count,
         "metrics": metrics,
         "latency_ms": {
             "infer_mean": float(latency.mean()) if latency.size else None,
